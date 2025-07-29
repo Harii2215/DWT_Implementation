@@ -3,7 +3,7 @@
 // Company: 
 // Engineer: 
 // 
-// Create Date: 04/13/2025 10:11:59 AM
+// Create Date: 05/04/2025 07:45:24 PM
 // Design Name: 
 // Module Name: dwt_haar_non_pipelined_top
 // Project Name: 
@@ -18,6 +18,7 @@
 // Additional Comments:
 // 
 //////////////////////////////////////////////////////////////////////////////////
+
 
 module dwt_haar_non_pipelined_top #(
     parameter N = 8
@@ -57,6 +58,7 @@ module dwt_haar_non_pipelined_top #(
     );
 
 endmodule
+
 module dwt_haar_non_pipelined_dp #(
     parameter N = 8
 )(
@@ -215,7 +217,7 @@ module dwt_haar_non_pipelined_ctrl #(
 endmodule
 
 
-   module haar_dwt_pair_core (
+module haar_dwt_pair_core (
     input  [15:0] x0,
     input  [15:0] x1,
     output [15:0] cA,
@@ -229,21 +231,14 @@ endmodule
     mult_by_181 m0 (.in(x0), .result(x0_mul));
     mult_by_181 m1 (.in(x1), .result(x1_mul));
 
-    kogge_stone_adder_32bit add (
-        .A(x0_mul), .B(x1_mul), .Cin(1'b0), .Sum(sum), .Cout(dummy)
-    );
-
-    assign x1_neg = ~x1_mul;
-    kogge_stone_adder_32bit twos (
-        .A(x1_neg), .B(32'd1), .Cin(1'b0), .Sum(x1_twos), .Cout(dummy)
-    );
-    kogge_stone_adder_32bit sub (
-        .A(x0_mul), .B(x1_twos), .Cin(1'b0), .Sum(diff), .Cout(dummy)
-    );
+    brent_kung_adder_32bit add (.A(x0_mul), .B(x1_mul), .Cin(1'b0), .Sum(sum), .Cout(dummy));
+    brent_kung_adder_32bit twos (.A(x1_neg), .B(32'd1), .Cin(1'b0), .Sum(x1_twos), .Cout(dummy));
+    brent_kung_adder_32bit sub (.A(x0_mul), .B(x1_twos), .Cin(1'b0), .Sum(diff), .Cout(dummy));
 
     assign cA = sum[23:8];
     assign cD = diff[23:8];
 endmodule
+
 module mult_by_181 (
     input  [15:0] in,
     output [31:0] result
@@ -257,46 +252,104 @@ module mult_by_181 (
     wire [31:0] temp1, temp2, temp3, temp4;
     wire c1, c2, c3, c4;
 
-    kogge_stone_adder_32bit ksa1 (.A(s1), .B(s2), .Cin(1'b0), .Sum(temp1), .Cout(c1));
-    kogge_stone_adder_32bit ksa2 (.A(temp1), .B(s3), .Cin(1'b0), .Sum(temp2), .Cout(c2));
-    kogge_stone_adder_32bit ksa3 (.A(temp2), .B(s4), .Cin(1'b0), .Sum(temp3), .Cout(c3));
-    kogge_stone_adder_32bit ksa4 (.A(temp3), .B(s5), .Cin(1'b0), .Sum(result), .Cout(c4));
-endmodule
-module kogge_stone_adder_32bit (
-    input  [31:0] A,
-    input  [31:0] B,
-    input         Cin,
-    output [31:0] Sum,
-    output        Cout
-);
-    wire [31:0] G[0:5], P[0:5];
-    wire [32:0] C;
+    brent_kung_adder_32bit ksa1 (.A(s1), .B(s2), .Cin(1'b0), .Sum(temp1), .Cout(c1));
+    brent_kung_adder_32bit ksa2 (.A(temp1), .B(s3), .Cin(1'b0), .Sum(temp2), .Cout(c2));
+    brent_kung_adder_32bit ksa3 (.A(temp2), .B(s4), .Cin(1'b0), .Sum(temp3), .Cout(c3));
+    brent_kung_adder_32bit ksa4 (.A(temp3), .B(s5), .Cin(1'b0), .Sum(result), .Cout(c4));
 
-    assign G[0] = A & B;
-    assign P[0] = A ^ B;
+endmodule
+
+// Brent-Kung Adder Implementation
+module prefix_op (
+    input  wire Gk, Pk, Gj, Pj,
+    output wire G_out, P_out
+);
+    assign G_out = Gk | (Pk & Gj);
+    assign P_out = Pk & Pj;
+endmodule
+
+module brent_kung_adder_32bit (
+    input  wire [31:0] A, B,
+    input  wire        Cin,
+    output wire [31:0] Sum,
+    output wire        Cout
+);
+
+    wire [31:0] G, P, C;
+    assign G = A & B;
+    assign P = A ^ B;
     assign C[0] = Cin;
 
-    genvar s, i;
+    // --- Prefix levels ---
+    wire [31:0] G1, P1, G2, P2, G3, P3, G4, P4, G5, P5;
+
+    // Level 1: distance 1
+    genvar i;
     generate
-        for (s = 0; s < 5; s = s + 1) begin: stage
-            for (i = 0; i < 32; i = i + 1) begin: bit
-                if (i >= (1 << s)) begin
-                    assign G[s+1][i] = G[s][i] | (P[s][i] & G[s][i - (1 << s)]);
-                    assign P[s+1][i] = P[s][i] & P[s][i - (1 << s)];
-                end else begin
-                    assign G[s+1][i] = G[s][i];
-                    assign P[s+1][i] = P[s][i];
-                end
-            end
+        for (i = 1; i < 32; i = i + 2) begin : L1
+            prefix_op u (G[i], P[i], G[i-1], P[i-1], G1[i], P1[i]);
         end
     endgenerate
 
+    // Level 2: distance 2
     generate
-        for (i = 1; i <= 32; i = i + 1) begin: carry
-            assign C[i] = G[5][i-1] | (P[5][i-1] & C[0]);
+        for (i = 3; i < 32; i = i + 4) begin : L2
+            prefix_op u (G1[i], P1[i], G1[i-2], P1[i-2], G2[i], P2[i]);
         end
     endgenerate
 
-    assign Sum = P[0] ^ C[31:0];
-    assign Cout = C[32];
+    // Level 3: distance 4
+    generate
+        for (i = 7; i < 32; i = i + 8) begin : L3
+            prefix_op u (G2[i], P2[i], G2[i-4], P2[i-4], G3[i], P3[i]);
+        end
+    endgenerate
+
+    // Level 4: distance 8
+    generate
+        for (i = 15; i < 32; i = i + 16) begin : L4
+            prefix_op u (G3[i], P3[i], G3[i-8], P3[i-8], G4[i], P4[i]);
+        end
+    endgenerate
+
+    // Level 5: distance 16
+    prefix_op L5 (G4[31], P4[31], G4[15], P4[15], G5[31], P5[31]);
+
+    // --- Compute Carries ---
+    // Optimized by tracing tree dependency (pre-computed offline or via script)
+    assign C[1]  = G[0]   | (P[0]   & C[0]);
+    assign C[2]  = G1[1]  | (P1[1]  & C[0]);
+    assign C[3]  = G[2]   | (P[2]   & C[2]);
+    assign C[4]  = G2[3]  | (P2[3]  & C[0]);
+    assign C[5]  = G[4]   | (P[4]   & C[4]);
+    assign C[6]  = G1[5]  | (P1[5]  & C[4]);
+    assign C[7]  = G[6]   | (P[6]   & C[6]);
+    assign C[8]  = G3[7]  | (P3[7]  & C[0]);
+    assign C[9]  = G[8]   | (P[8]   & C[8]);
+    assign C[10] = G1[9]  | (P1[9]  & C[8]);
+    assign C[11] = G[10]  | (P[10]  & C[10]);
+    assign C[12] = G2[11] | (P2[11] & C[8]);
+    assign C[13] = G[12]  | (P[12]  & C[12]);
+    assign C[14] = G1[13] | (P1[13] & C[12]);
+    assign C[15] = G[14]  | (P[14]  & C[14]);
+    assign C[16] = G4[15] | (P4[15] & C[0]);
+    assign C[17] = G[16]  | (P[16]  & C[16]);
+    assign C[18] = G1[17] | (P1[17] & C[16]);
+    assign C[19] = G[18]  | (P[18]  & C[18]);
+    assign C[20] = G2[19] | (P2[19] & C[16]);
+    assign C[21] = G[20]  | (P[20]  & C[20]);
+    assign C[22] = G1[21] | (P1[21] & C[20]);
+    assign C[23] = G[22]  | (P[22]  & C[22]);
+    assign C[24] = G3[23] | (P3[23] & C[16]);
+    assign C[25] = G[24]  | (P[24]  & C[24]);
+    assign C[26] = G1[25] | (P1[25] & C[24]);
+    assign C[27] = G[26]  | (P[26]  & C[26]);
+    assign C[28] = G2[27] | (P2[27] & C[24]);
+    assign C[29] = G[28]  | (P[28]  & C[28]);
+    assign C[30] = G1[29] | (P1[29] & C[28]);
+    assign C[31] = G[30]  | (P[30]  & C[30]);
+
+    assign Sum  = P ^ C;
+    assign Cout = G[31] | (P[31] & C[31]);
+
 endmodule
